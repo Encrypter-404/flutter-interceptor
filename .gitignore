@@ -1,0 +1,10 @@
+# secrets & runtime state — never publish
+mitm_ca/
+*.key
+*.log
+captured_requests_*.txt
+# python
+__pycache__/
+*.pyc
+.venv/
+env/

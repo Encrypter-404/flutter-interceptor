@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flutter Interceptor</title>
+<style>
+  :root{
+    --bg:#0a0a0e; --bg2:#0f0f14; --panel:#141419; --panel2:#1a1a22; --card:#15151b; --cardh:#1e1e28;
+    --ink:#f5f6fa; --ink2:#c9ccd8; --mut:#878ba0;
+    --mut2:#a6aabe; --line:#262630; --line2:#353541; --acc:#7c5cff; --acc2:#4f8cff;
+    --ok:#36d399; --bad:#fb5d6e; --warn:#fbbf24; --sidebar:#0b0b0f; --code:#070709;
+    --grad:linear-gradient(135deg,#7c5cff,#4f8cff);
+    --shadow:0 18px 48px rgba(0,0,0,.62);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{font:14px/1.5 "Segoe UI Variable","Segoe UI",system-ui,Roboto,Arial,sans-serif;color:var(--ink);
+    background:radial-gradient(1100px 650px at 84% -12%,#181433 0%,var(--bg) 52%);overflow:hidden;user-select:none;-webkit-font-smoothing:antialiased}
+  .app{display:flex;height:100vh}
+
+  /* ---------- sidebar ---------- */
+  .side{width:212px;background:linear-gradient(180deg,#16181d,#0f1014);border-right:1px solid var(--line);
+    display:flex;flex-direction:column;padding:20px 0 14px}
+  .brand{display:flex;align-items:center;gap:11px;padding:0 18px 20px}
+  .logo{width:38px;height:38px;border-radius:11px;background:var(--grad);display:flex;align-items:center;justify-content:center;
+    font-weight:800;color:#fff;font-size:19px;box-shadow:0 6px 18px rgba(124,92,255,.34)}
+  .brand b{font-size:15px;display:block;letter-spacing:.2px}
+  .brand span{font-size:10.5px;color:var(--mut);letter-spacing:.4px}
+  .nav{margin-top:6px;flex:1;padding:0 10px}
+  .nav a{display:flex;align-items:center;gap:12px;padding:11px 13px;color:var(--mut);cursor:pointer;font-weight:600;
+    border-radius:10px;transition:.15s;margin-bottom:3px;position:relative}
+  .nav a:hover{color:var(--ink);background:#16181d}
+  .nav a.on{color:#fff;background:linear-gradient(135deg,rgba(124,92,255,.18),rgba(79,140,255,.08))}
+  .nav a.on::before{content:"";position:absolute;left:-10px;top:9px;bottom:9px;width:3px;border-radius:3px;background:var(--grad)}
+  .nav .ic{width:20px;text-align:center;font-size:15px}
+  .nav .badge{margin-left:auto;font-size:10px;font-weight:700;background:var(--bad);color:#1a0008;border-radius:999px;padding:1px 7px;display:none}
+  .nav a.has-badge .badge{display:inline-block}
+  .side-foot{padding:0 14px}
+  .dot{padding:10px 12px;border-radius:11px;background:#16181d;border:1px solid var(--line);font-size:12px;color:var(--mut2);
+    display:flex;align-items:center;gap:9px}
+  .dot i{width:9px;height:9px;border-radius:50%;background:#566;flex:none;transition:.2s}
+  .dot.idle i{background:#5b667d}
+  .dot.starting i{background:var(--warn);animation:pulse 1s infinite}
+  .dot.active i{background:var(--ok);animation:pulse 1.4s infinite}
+  .dot.err i{background:var(--bad)}
+  .dot b{color:var(--ink);font-weight:600;text-transform:capitalize}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(52,211,153,.55)}70%{box-shadow:0 0 0 7px transparent}100%{box-shadow:0 0 0 0 transparent}}
+
+  /* ---------- main ---------- */
+  .main{flex:1;display:flex;flex-direction:column;min-width:0}
+  /* persistent top app-bar */
+  .topbar{display:flex;align-items:center;gap:12px;padding:13px 24px;border-bottom:1px solid var(--line);
+    background:rgba(20,22,27,.72);backdrop-filter:blur(8px)}
+  .tb-title{font-size:13px;font-weight:700;color:var(--mut2);letter-spacing:.3px;margin-right:4px}
+  .dev-wrap{display:flex;align-items:center;gap:8px}
+  .grow{flex:1}
+  .statbadge{display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600;padding:7px 13px;border-radius:999px;
+    background:#16181d;border:1px solid var(--line);color:var(--mut2)}
+  .statbadge i{width:8px;height:8px;border-radius:50%;background:#5b667d;flex:none}
+  .statbadge.active{color:#86efac;border-color:#1f4d3c;background:#0f2a20}.statbadge.active i{background:var(--ok);animation:pulse 1.4s infinite}
+  .statbadge.starting{color:#fde68a;border-color:#5a4d18;background:#241f0e}.statbadge.starting i{background:var(--warn);animation:pulse 1s infinite}
+  .statbadge.err{color:#fca5a5;border-color:#5b2630;background:#241115}.statbadge.err i{background:var(--bad)}
+  /* progress hairline under topbar */
+  .hair{height:2px;background:transparent;flex:none}
+  .hair.load{background:linear-gradient(90deg,transparent,var(--acc),var(--acc2),transparent);background-size:200% 100%;animation:flow 1.1s linear infinite}
+  @keyframes flow{0%{background-position:200% 0}100%{background-position:-200% 0}}
+
+  .view{display:none;flex:1;flex-direction:column;min-height:0;padding:22px 24px 18px;overflow:hidden}
+  .view.on{display:flex;animation:fade .22s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  h1{font-size:20px;font-weight:750;letter-spacing:.2px}
+  .sub{color:var(--mut);font-size:13px;margin-top:4px}
+  .head{display:flex;align-items:flex-end;gap:14px;margin-bottom:16px}
+
+  /* inputs / buttons */
+  select,input,button{font:inherit;color:var(--ink);background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 12px;outline:none;transition:.15s}
+  select:hover,input:hover{border-color:var(--line2)}
+  select:focus,input:focus{border-color:var(--acc);box-shadow:0 0 0 3px rgba(124,92,255,.18)}
+  select{cursor:pointer;min-width:240px}
+  .pill{font-size:11.5px;padding:5px 11px;border-radius:999px;background:#16181d;border:1px solid var(--line);color:var(--mut);font-weight:600}
+  .pill.ok{color:var(--ok);border-color:#1f4d3c;background:#0f2a20}
+  .pill.bad{color:var(--bad);border-color:#5b2630;background:#241115}
+  .btn{cursor:pointer;border:none;font-weight:700;transition:.15s;border-radius:10px}
+  .btn.acc{background:var(--grad);color:#fff;box-shadow:0 6px 16px rgba(124,92,255,.28)}
+  .btn.acc:hover{filter:brightness(1.06);transform:translateY(-1px)}
+  .btn.stop{background:linear-gradient(135deg,#fb7185,#f43f5e);color:#2a0008}.btn.stop:hover{filter:brightness(1.07);transform:translateY(-1px)}
+  .btn.ghost{background:var(--panel2);border:1px solid var(--line);color:var(--ink2)}.btn.ghost:hover{background:var(--cardh);border-color:var(--line2)}
+  .btn:disabled{opacity:.4;cursor:default;filter:none;transform:none;box-shadow:none}
+
+  /* config strip */
+  .config{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--panel);border:1px solid var(--line);
+    border-radius:14px;padding:12px 14px;margin-bottom:16px}
+  .cfg-label{font-size:11px;font-weight:700;letter-spacing:.6px;color:var(--mut);text-transform:uppercase;margin-right:2px}
+  .toggle{display:inline-flex;align-items:center;gap:8px;padding:7px 12px;border-radius:10px;background:var(--panel2);
+    border:1px solid var(--line);cursor:pointer;font-weight:600;font-size:12.5px;color:var(--mut2);transition:.15s}
+  .toggle:hover{border-color:var(--line2)}
+  .toggle .tk{width:30px;height:17px;border-radius:999px;background:#3a3e4a;position:relative;flex:none;transition:.16s}
+  .toggle .tk::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:#8a97b4;transition:.16s}
+  .toggle.on{color:#fff;border-color:#3a3170;background:#181433}
+  .toggle.on .tk{background:var(--grad)}.toggle.on .tk::after{left:15px;background:#fff}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--panel2)}
+  .seg div{padding:8px 13px;cursor:pointer;color:var(--mut);font-weight:600;font-size:12.5px;transition:.15s}
+  .seg div.on{background:var(--grad);color:#fff}
+  .portbox{display:flex;align-items:center;gap:7px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:3px 4px 3px 12px}
+  .portbox span{font-size:12.5px;color:var(--mut);font-weight:600}
+  .portbox input{border:none;background:transparent;width:66px;padding:6px 6px;text-align:center;font-weight:700}
+  .portbox input:focus{box-shadow:none}
+  .vline{width:1px;align-self:stretch;background:var(--line);margin:2px 4px}
+
+  /* app grid */
+  .gridhead{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+  .gridhead .count{font-size:12.5px;color:var(--mut);font-weight:600}
+  .gridhead .count b{color:var(--ink)}
+  .search{display:flex;align-items:center;gap:8px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:0 12px}
+  .search input{border:none;background:transparent;padding:9px 0;width:230px}.search input:focus{box-shadow:none}
+  .search .si{color:var(--mut)}
+  .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px;overflow:auto;padding:3px;flex:1;align-content:start}
+  .card{display:flex;align-items:center;gap:13px;background:var(--card);border:1px solid var(--line);border-radius:14px;
+    padding:13px 15px;cursor:pointer;transition:.16s;position:relative;overflow:hidden}
+  .card::after{content:"";position:absolute;inset:0;border-radius:14px;opacity:0;transition:.16s;
+    background:linear-gradient(135deg,rgba(124,92,255,.12),transparent 62%);pointer-events:none}
+  .card:hover{transform:translateY(-2px);border-color:#3b357e;background:var(--cardh);box-shadow:var(--shadow)}
+  .card:hover::after{opacity:1}
+  .card .av{width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-weight:800;
+    color:#0a0a12;font-size:18px;box-shadow:0 4px 12px rgba(0,0,0,.35);flex:none}
+  .card .av.img{background:#fff;padding:5px;overflow:hidden}
+  .card .av.img img{width:100%;height:100%;object-fit:contain;border-radius:7px;display:block}
+  .card .body{min-width:0;flex:1}
+  .card h3{font-size:14.5px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .card p{font-size:11px;color:var(--mut);line-height:1.35;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:"Cascadia Code",Consolas,monospace}
+  .chips{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+  .chip{font-size:9.5px;font-weight:700;letter-spacing:.5px;border-radius:6px;padding:2px 7px}
+  .chip.fl{color:#b9aaff;background:#181433;border:1px solid #332e66}
+  .chip.sz{color:var(--mut2);background:#23262f;border:1px solid var(--line)}
+  .card .go{position:absolute;right:13px;top:50%;transform:translateY(-50%) translateX(-4px);color:var(--mut);font-size:16px;opacity:0;transition:.16s}
+  .card:hover .go{opacity:1;transform:translateY(-50%) translateX(0);color:var(--acc2)}
+  .empty{color:var(--mut);padding:48px 20px;text-align:center;grid-column:1/-1}
+  .empty .big{font-size:34px;opacity:.5;margin-bottom:10px}
+  .empty b{color:var(--ink2);display:block;margin-bottom:5px;font-size:15px}
+
+  /* activity */
+  .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px}
+  .metric{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:13px 15px}
+  .metric .k{font-size:10.5px;letter-spacing:.6px;text-transform:uppercase;color:var(--mut);font-weight:700}
+  .metric .v{font-size:17px;font-weight:750;margin-top:5px;font-family:"Cascadia Code",Consolas,monospace}
+  .metric .v.mono{font-size:15px}
+  .statusbar{padding:13px 16px;border-radius:12px;font-weight:600;margin-bottom:12px;border:1px solid var(--line);background:var(--panel2);display:flex;align-items:center;gap:10px}
+  .statusbar .si{font-size:16px}
+  .statusbar.active{background:#0f2a20;border-color:#1f4d3c;color:#86efac}
+  .statusbar.starting{background:#241f0e;border-color:#5a4d18;color:#fde68a}
+  .statusbar.err{background:#241115;border-color:#5b2630;color:#fca5a5}
+  .logwrap{flex:1;display:flex;flex-direction:column;min-height:0;background:var(--code);border:1px solid var(--line);border-radius:13px;overflow:hidden}
+  .logbar{display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--line);background:#0b0c0f}
+  .logbar .t{font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--mut);font-weight:700}
+  .logbar .dots{display:flex;gap:6px}.logbar .dots i{width:9px;height:9px;border-radius:50%}
+  .logbar .dots i:nth-child(1){background:#fb7185}.logbar .dots i:nth-child(2){background:#fbbf24}.logbar .dots i:nth-child(3){background:#34d399}
+  .log{flex:1;padding:14px 16px;overflow:auto;font:12.5px/1.65 "Cascadia Code",Consolas,monospace;white-space:pre-wrap;color:#cdd6e4}
+  .log .ln{display:block}
+  .log .ok{color:#86efac}.log .bad{color:#fca5a5}.log .acc{color:#7dd3fc}.log .warn{color:#fde68a}
+  .log .empty-log{color:var(--mut);font-style:italic}
+
+  /* help */
+  .help{max-width:760px;overflow:auto;padding-right:6px}
+  .step{display:flex;gap:14px;padding:16px;background:var(--panel);border:1px solid var(--line);border-radius:13px;margin-bottom:12px}
+  .step .n{width:30px;height:30px;border-radius:9px;background:var(--grad);color:#fff;font-weight:800;display:flex;align-items:center;justify-content:center;flex:none}
+  .step .body{flex:1}
+  .step h3{font-size:14.5px;margin-bottom:5px}
+  .step p{font-size:13px;color:var(--mut2);line-height:1.55}
+  .kbd{background:#16181d;border:1px solid var(--line2);border-radius:6px;padding:2px 7px;font-family:"Cascadia Code",Consolas,monospace;font-size:12px;color:var(--acc2)}
+  .copyrow{display:flex;align-items:center;gap:8px;margin-top:9px;background:var(--code);border:1px solid var(--line);border-radius:9px;padding:8px 10px}
+  .copyrow code{flex:1;font-family:"Cascadia Code",Consolas,monospace;font-size:12.5px;color:#cdd6e4}
+  .copyrow button{padding:5px 11px;font-size:11.5px;font-weight:700;background:var(--panel2);border:1px solid var(--line)}
+  .copyrow button:hover{border-color:var(--acc)}
+  .note{font-size:12.5px;color:var(--mut);background:#13112a;border:1px solid var(--line);border-left:3px solid var(--acc);border-radius:9px;padding:11px 14px;margin-top:6px}
+
+  .credit{margin-top:10px;text-align:center;font-size:10.5px;color:var(--mut);letter-spacing:.2px}
+  .credit b{color:var(--ink2);font-weight:700}
+  #reqBadge{display:inline-block;background:var(--panel2);color:var(--mut2);border:1px solid var(--line)}
+  /* requests view */
+  .reqwrap{flex:1;display:flex;flex-direction:column;min-height:0;border:1px solid var(--line);border-radius:13px;overflow:hidden;background:var(--panel)}
+  .reqhead{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);background:var(--panel2)}
+  .reqhead .t{font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--mut);font-weight:700}
+  .reqlist{flex:1;overflow:auto;min-height:0}
+  .reqrow{display:flex;align-items:center;gap:12px;padding:9px 14px;border-bottom:1px solid var(--line);cursor:pointer;font-size:12.5px}
+  .reqrow:hover{background:var(--cardh)}
+  .reqrow.sel{background:#181433}
+  .reqrow .m{font-weight:800;width:48px;flex:none;font-family:"Cascadia Code",Consolas,monospace;font-size:11px}
+  .reqrow .m.GET{color:#36d399}.reqrow .m.POST{color:#4f8cff}.reqrow .m.PUT,.reqrow .m.PATCH{color:#fbbf24}
+  .reqrow .m.DELETE{color:#fb5d6e}.reqrow .m.RESP{color:#a6aabe}.reqrow .m.WS{color:#c084fc}
+  .reqrow .m{width:56px}
+  .reqrow .u{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ink2);font-family:"Cascadia Code",Consolas,monospace}
+  .reqrow .tm{color:var(--mut);font-size:11px;flex:none}
+  .reqdetail{height:40%;border-top:1px solid var(--line);overflow:auto;padding:12px 14px;font:12px/1.55 "Cascadia Code",Consolas,monospace;white-space:pre-wrap;color:#cdd6e4;background:var(--code);display:none}
+  .reqdetail.on{display:block}
+  /* report */
+  .rsec{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:13px 15px;margin-bottom:11px}
+  .rsec-t{font-size:11px;letter-spacing:.6px;text-transform:uppercase;color:var(--mut);font-weight:700;margin-bottom:8px}
+  .rrow{font-size:13px;color:var(--ink2);margin:3px 0}
+  .rchip{display:inline-block;font-size:11.5px;font-weight:600;border-radius:7px;padding:3px 9px;margin:3px 5px 3px 0;background:var(--panel2);border:1px solid var(--line);color:var(--ink2)}
+  .rchip.acc{color:#9db4ff;border-color:#33306a;background:#181433}
+  .rchip.warn{color:#fbbf24;border-color:#5a4d18;background:#241f0e}
+  .rchip.ok{color:var(--ok)} .rchip.bad{color:var(--bad)}
+  .rmut{color:var(--mut);font-size:12.5px}
+  .rrow .ok{color:var(--ok);font-weight:800} .rrow .bad{color:var(--bad);font-weight:800}
+  .rlist{margin:4px 0 0 18px;color:var(--ink2);font-size:13px;line-height:1.65}
+  /* toasts */
+  .toasts{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:9px;z-index:50}
+  .toast{background:var(--panel);border:1px solid var(--line2);border-radius:11px;padding:11px 15px;font-size:13px;font-weight:600;
+    box-shadow:var(--shadow);display:flex;align-items:center;gap:9px;min-width:230px;animation:slidein .25s ease}
+  .toast.ok{border-color:#1f4d3c}.toast.bad{border-color:#5b2630}.toast .ti{font-size:15px}
+  @keyframes slidein{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:none}}
+
+  ::-webkit-scrollbar{width:11px;height:11px}
+  ::-webkit-scrollbar-thumb{background:#3a3e4a;border-radius:8px;border:2px solid transparent;background-clip:padding-box}
+  ::-webkit-scrollbar-thumb:hover{background:#4a4f5c;background-clip:padding-box}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- ---------- SIDEBAR ---------- -->
+  <div class="side">
+    <div class="brand"><div class="logo">⬡</div><div><b>Flutter Interceptor</b><span>UNIVERSAL · FRIDA 17</span></div></div>
+    <div class="nav">
+      <a class="on" data-v="intercept"><span class="ic">◎</span> Intercept</a>
+      <a data-v="requests"><span class="ic">⇄</span> Requests<span class="badge" id="reqBadge">0</span></a>
+      <a data-v="report"><span class="ic">◔</span> Report</a>
+      <a data-v="activity"><span class="ic">≣</span> Activity<span class="badge" id="navBadge">live</span></a>
+      <a data-v="help"><span class="ic">?</span> Burp setup</a>
+    </div>
+    <div class="side-foot">
+      <div class="dot idle" id="dot"><i></i><span>Status: <b id="dotText">idle</b></span></div>
+      <div class="credit">Developed by <b>Parth Raval</b></div>
+    </div>
+  </div>
+
+  <!-- ---------- MAIN ---------- -->
+  <div class="main">
+    <div class="topbar">
+      <span class="tb-title">Device</span>
+      <div class="dev-wrap">
+        <select id="dev"></select>
+        <button class="btn ghost" onclick="loadDevices()" style="padding:9px 13px" title="Refresh devices">↻</button>
+        <button class="btn ghost" onclick="mirror()" style="padding:9px 13px" title="Mirror the phone screen (scrcpy)">▣ Screen</button>
+        <span class="pill" id="rootPill">—</span>
+      </div>
+      <span class="grow"></span>
+      <div class="statbadge" id="statbadge"><i></i><span id="statbadgeText">Idle</span></div>
+    </div>
+    <div class="hair" id="hair"></div>
+
+    <!-- INTERCEPT -->
+    <div class="view on" data-view="intercept">
+      <div class="head">
+        <div><h1>Intercept a Flutter app</h1>
+          <div class="sub">Pick an app — it provisions frida, unpins TLS, and routes traffic to your proxy. One click.</div></div>
+      </div>
+
+      <div class="config">
+        <span class="cfg-label">Bypass</span>
+        <div class="toggle on" id="sw_ssl" onclick="tog('ssl')"><span class="tk"></span>SSL unpinning</div>
+        <div class="toggle on" id="sw_root" onclick="tog('root')"><span class="tk"></span>Root detection</div>
+        <div class="toggle" id="sw_vpn" onclick="tog('vpn')"><span class="tk"></span>VPN detection</div>
+        <div class="vline"></div>
+        <span class="cfg-label">Resilience</span>
+        <div class="toggle on" id="sw_auto" onclick="togAuto()"><span class="tk"></span>Auto-recover on crash</div>
+        <div class="toggle on" id="sw_antifrida" onclick="tog('antifrida')" title="Universal anti-detection: anti-ptrace + keep-alive + frida-hide. Helps most apps; safe to leave on."><span class="tk"></span>Anti-detection</div>
+        <div class="toggle" id="sw_stealth" onclick="tog('stealth')" title="Experimental: run frida-server under a hidden name + non-standard port (uses attach). Try this ONLY if an app detects frida-server and crashes; leave off for normal apps."><span class="tk"></span>Stealth (experimental)</div>
+        <div class="toggle" id="sw_mitmcap" onclick="tog('mitmcap')" title="In-tool capture proxy: the tool decrypts traffic itself and shows ALL requests (incl. pure-Dart) in the Requests tab — no Burp needed. Uses the proxy port."><span class="tk"></span>Capture proxy</div>
+        <div class="vline"></div>
+        <span class="cfg-label">Mode</span>
+        <div class="seg" id="seg"><div class="on" data-m="spawn" onclick="setMode('spawn')">Spawn</div><div data-m="attach" onclick="setMode('attach')">Attach</div></div>
+        <div class="vline"></div>
+        <span class="cfg-label">Proxy</span>
+        <div class="portbox"><span>PC :</span><input id="port" value="8080"></div>
+      </div>
+
+      <div class="gridhead">
+        <span class="count" id="count"><b>0</b> Flutter apps</span>
+        <span class="grow"></span>
+        <div class="search"><span class="si">⌕</span><input id="filter" placeholder="Filter apps…" oninput="renderCards()"></div>
+      </div>
+      <div class="cards" id="cards">
+        <div class="empty"><div class="big">⬡</div><b>Connect a rooted device</b>Then hit ↻ to scan for Flutter apps.</div>
+      </div>
+    </div>
+
+    <!-- REQUESTS -->
+    <div class="view" data-view="requests">
+      <div class="head">
+        <div><h1>Captured requests</h1><div class="sub">Live HTTP + WebSocket seen at the app's TLS layer. Burp shows everything; this is the quick in-tool view.</div></div>
+      </div>
+      <div class="config" style="margin-bottom:12px">
+        <div class="search" style="flex:1"><span class="si">⌕</span><input id="reqFilter" placeholder="Filter by URL / method / body…" oninput="renderReqs()" style="width:100%"></div>
+        <div class="toggle" id="sw_pause" onclick="togPause()" title="Pause/resume capture"><span class="tk"></span>Pause</div>
+        <button class="btn ghost" onclick="copyReq()" style="padding:8px 13px" title="Copy selected request">⧉ Copy</button>
+        <button class="btn ghost" onclick="exportReqs()" style="padding:8px 13px" title="Export all to a .txt file">⭳ Export</button>
+        <button class="btn ghost" onclick="clearReqs()" style="padding:8px 13px">Clear</button>
+      </div>
+      <div class="reqwrap">
+        <div class="reqhead"><span class="t">requests</span><span class="grow"></span><span class="t" id="reqCount">0 captured</span></div>
+        <div class="reqlist" id="reqlist"><div class="empty" style="padding:40px"><div class="big">⇄</div><b>No requests captured yet</b>Start intercepting an app and use it. Captured HTTPS (where readable) appears here; Burp shows everything.</div></div>
+        <div class="reqdetail" id="reqdetail"></div>
+      </div>
+    </div>
+
+    <!-- REPORT -->
+    <div class="view" data-view="report">
+      <div class="head"><div><h1>Compatibility report</h1>
+        <div class="sub">Auto-detected environment, hooks, and recommended fixes. Generated when you start intercepting.</div></div></div>
+      <div id="reportBody" style="overflow:auto">
+        <div class="empty" style="padding:48px"><div class="big">◔</div><b>No report yet</b>Start intercepting an app — detection runs automatically.</div>
+      </div>
+    </div>
+
+    <!-- ACTIVITY -->
+    <div class="view" data-view="activity">
+      <div class="head">
+        <div><h1>Activity</h1><div class="sub">Live engine log. Traffic flows to your proxy in invisible mode.</div></div>
+        <span class="grow"></span>
+        <button class="btn stop" id="stopBtn" onclick="stopIntercept()" style="padding:10px 18px">■ Stop &amp; restore</button>
+      </div>
+      <div class="metrics">
+        <div class="metric"><div class="k">Target app</div><div class="v mono" id="mApp">—</div></div>
+        <div class="metric"><div class="k">Proxy</div><div class="v mono" id="mProxy">—</div></div>
+        <div class="metric"><div class="k">Uptime</div><div class="v" id="mUptime">—</div></div>
+        <div class="metric"><div class="k">Traffic → proxy</div><div class="v" id="mTraffic">—</div></div>
+      </div>
+      <div class="statusbar" id="statusbar"><span class="si">○</span><span id="statusText">Not intercepting.</span></div>
+      <div class="logwrap">
+        <div class="logbar"><div class="dots"><i></i><i></i><i></i></div><span class="t">engine log</span>
+          <span class="grow"></span><button class="btn ghost" onclick="clearLog()" style="padding:4px 11px;font-size:11px">Clear</button></div>
+        <div class="log" id="log"><span class="ln empty-log">Waiting for activity…</span></div>
+      </div>
+    </div>
+
+    <!-- HELP -->
+    <div class="view" data-view="help">
+      <div class="head"><div><h1>Burp / HTTP Toolkit setup</h1>
+        <div class="sub">The tool routes the app's traffic to your PC. Your proxy just needs an invisible listener.</div></div></div>
+      <div class="help">
+        <div class="step"><div class="n">1</div><div class="body">
+          <h3>Add an invisible proxy listener</h3>
+          <p>Burp → <span class="kbd">Proxy → Proxy settings → Add</span>. Bind to port <span class="kbd">8080</span>, bind to <span class="kbd">All interfaces</span> (or loopback), and under <b>Request handling</b> tick <b>“Support invisible proxying”</b>. This is required — Flutter traffic arrives transparently with no proxy headers.</p>
+        </div></div>
+        <div class="step"><div class="n">2</div><div class="body">
+          <h3>Match the port here</h3>
+          <p>Set the <b>Proxy PC :</b> port on the Intercept tab to the same port your listener uses. The tool builds an <span class="kbd">adb reverse</span> tunnel + <span class="kbd">iptables</span> redirect so the device reaches your PC on that port.</p>
+        </div></div>
+        <div class="step"><div class="n">3</div><div class="body">
+          <h3>Trust isn't needed — TLS is unpinned in-app</h3>
+          <p>The engine patches Flutter's BoringSSL <code>ssl_verify_peer_cert</code> and the Java/Conscrypt trust managers, so you'll see decrypted HTTPS without installing the Burp CA on the device.</p>
+        </div></div>
+        <div class="step"><div class="n">4</div><div class="body">
+          <h3>Intercept the same app you launch</h3>
+          <p>Clicking an app card sets the redirect for <b>that app's uid</b> only. Pick the app you actually want to capture — running a different app won't be routed.</p>
+          <div class="note">When you hit <b>Stop</b> (or close the window) everything is reverted: hooks detach, iptables rules + adb-reverse are removed, <code>route_localnet</code> is restored, and the frida-server is killed. The device returns to normal.</div>
+        </div></div>
+      </div>
+
+      <div class="head" style="margin-top:22px"><div><h1>Crash troubleshooting — what to enable</h1>
+        <div class="sub">When an app crashes, the Activity log prints a DIAGNOSIS. This is the cheat-sheet.</div></div></div>
+      <div class="help">
+        <div class="step"><div class="n">A</div><div class="body">
+          <h3>App closes instantly / stuck at splash → frida-server detection</h3>
+          <p>The app detects frida-server (process name / port 27042) and self-kills. <b>Enable “Stealth (experimental)”</b> (runs frida-server hidden) and keep <b>“Anti-detection”</b> ON. The tool auto-recovers crashes by default.</p>
+        </div></div>
+        <div class="step"><div class="n">B</div><div class="body">
+          <h3>“connection-terminated” in the log → server killed</h3>
+          <p>The frida connection dropped. <b>Enable Stealth</b>; auto-recover reprovisions the server and re-applies patches automatically.</p>
+        </div></div>
+        <div class="step"><div class="n">C</div><div class="body">
+          <h3>Still crashing with Stealth ON → try Attach</h3>
+          <p>Switch <b>Mode → Attach</b>: open the app yourself, let it fully load past its checks, then click it in the tool. Spawn-time checks are the hardest, and attaching after load often survives.</p>
+        </div></div>
+        <div class="step"><div class="n">D</div><div class="body">
+          <h3>You see “kept app alive (blocked …)” then it still dies</h3>
+          <p>That's <b>“Anti-detection” working</b> — it blocked the app's <code>exit</code>/<code>kill</code>/<code>tgkill</code>/<code>raise</code> self-kills. If it dies anyway, the app escalated to a deliberate <b>SIGSEGV crash</b> that can't be blocked generically — that app needs a per-app anti-tamper patch.</p>
+          <div class="note">Recommended defaults for stubborn apps: <b>SSL ✓ · Root ✓ · Anti-detection ✓ · Auto-recover ✓ · Stealth ✓</b>, and if it still won't stay up, <b>Mode → Attach</b>.</div>
+        </div></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="toasts" id="toasts"></div>
+
+<script>
+  var OPTS={ssl:true,root:true,vpn:false,mode:"spawn",antifrida:true,stealth:false,mitmcap:false}, APPS=[], READY=false, ICONS={};
+  var STATE="idle", upStart=0, upTimer=null;
+  function $(id){return document.getElementById(id)}
+
+  /* ----- nav ----- */
+  document.querySelectorAll('.nav a').forEach(a=>a.onclick=()=>showView(a.dataset.v));
+  function showView(v){
+    document.querySelectorAll('.nav a').forEach(x=>x.classList.toggle('on',x.dataset.v===v));
+    document.querySelectorAll('.view').forEach(x=>x.classList.toggle('on',x.dataset.view===v));
+  }
+  function tog(k){OPTS[k]=!OPTS[k]; $('sw_'+k).classList.toggle('on',OPTS[k]);}
+  var AUTO=true;
+  function togAuto(){AUTO=!AUTO; $('sw_auto').classList.toggle('on',AUTO);
+    if(window.pywebview&&window.pywebview.api.set_auto) window.pywebview.api.set_auto(AUTO);
+    toast('Auto-recover '+(AUTO?'enabled':'disabled'));}
+  function setMode(m){OPTS.mode=m; document.querySelectorAll('#seg div').forEach(d=>d.classList.toggle('on',d.dataset.m===m));}
+  function loading(on){$('hair').classList.toggle('load',on);}
+
+  /* ----- toasts ----- */
+  function toast(msg,kind){
+    var t=document.createElement('div');t.className='toast '+(kind||'');
+    t.innerHTML='<span class="ti">'+(kind==='bad'?'✕':kind==='ok'?'✓':'•')+'</span>'+msg;
+    $('toasts').appendChild(t);
+    setTimeout(()=>{t.style.opacity='0';t.style.transform='translateX(20px)';t.style.transition='.3s';setTimeout(()=>t.remove(),320)},3200);
+  }
+
+  /* ----- per-app avatar colour (deterministic from package) ----- */
+  function hue(s){var h=0;for(var i=0;i<s.length;i++)h=(h*31+s.charCodeAt(i))%360;return h;}
+  function avStyle(pkg){var h=hue(pkg);return'background:linear-gradient(135deg,hsl('+h+',70%,62%),hsl('+((h+40)%360)+',75%,55%))';}
+
+  /* ----- log + status (called from Python) ----- */
+  window.clearLog=function(){$('log').innerHTML='<span class="ln empty-log">Cleared.</span>';}
+  function lineClass(m){return m.startsWith('[+]')?'ok':m.startsWith('[!]')?'bad':m.startsWith('[*]')?'acc':/error|fail|warn/i.test(m)?'warn':'';}
+  window.fiLog=function(m){ fiLogBatch([m]); }
+  window.fiLogBatch=function(arr){
+    if(!arr||!arr.length)return;
+    var l=$('log');var first=l.querySelector('.empty-log'); if(first)l.innerHTML='';
+    var frag=document.createDocumentFragment();
+    arr.forEach(function(m){var s=document.createElement('span');s.className='ln '+lineClass(m);s.textContent=m;frag.appendChild(s);});
+    l.appendChild(frag);
+    /* cap DOM size so a long session can't bloat memory/repaint cost */
+    while(l.childNodes.length>2000) l.removeChild(l.firstChild);
+    l.scrollTop=l.scrollHeight;
+  }
+  window.fiStatus=function(state,text){
+    STATE=state;
+    var d=$('dot');d.className='dot '+state;$('dotText').textContent=state;
+    var sb=$('statbadge');sb.className='statbadge '+(state==='idle'?'':state);
+    $('statbadgeText').textContent={idle:'Idle',starting:'Starting…',active:'Intercepting',err:'Error'}[state]||state;
+    var bar=$('statusbar');bar.className='statusbar '+(state==='idle'?'':state);
+    bar.querySelector('.si').textContent={idle:'○',starting:'◐',active:'●',err:'✕'}[state]||'○';
+    $('statusText').textContent=text;
+    $('stopBtn').disabled=false; /* always allow force-stop / restore */
+    $('navBadge').parentElement.classList.toggle('has-badge',state==='active');
+    loading(state==='starting');
+    if(state==='active'){startUptime();}else if(state!=='starting'){stopUptime();}
+  }
+  window.fiTraffic=function(pkts,bytes){
+    var el=$('mTraffic'); if(!el)return;
+    var kb=bytes>=1048576?(bytes/1048576).toFixed(1)+' MB':(bytes/1024).toFixed(0)+' KB';
+    el.textContent=pkts>0?(pkts+' pkts · '+kb):'0 (idle?)';
+    el.style.color=pkts>0?'var(--ok)':'var(--mut)';
+  };
+  function startUptime(){ if(upTimer)return; upStart=Date.now(); upTimer=setInterval(()=>{
+      var s=Math.floor((Date.now()-upStart)/1000),m=Math.floor(s/60);
+      $('mUptime').textContent=(m?m+'m ':'')+(s%60)+'s';},1000); }
+  function stopUptime(){ if(upTimer){clearInterval(upTimer);upTimer=null;} }
+
+  /* ----- devices / apps ----- */
+  function loadDevices(){
+    if(!READY)return;
+    $('rootPill').textContent='detecting…'; $('rootPill').className='pill';
+    $('cards').innerHTML='<div class="empty"><div class="big">⟳</div><b>Detecting device…</b>If the phone shows a superuser prompt, tap Allow.</div>';
+    window.pywebview.api.refresh_devices(); /* async — result arrives via fiDevices() */
+  }
+  window.fiDevices=function(devs){
+    var sel=$('dev');sel.innerHTML='';
+    if(!devs||!devs.length){
+      $('rootPill').textContent='no device';$('rootPill').className='pill bad';
+      $('cards').innerHTML='<div class="empty"><div class="big">⬡</div><b>No device found</b>Connect a rooted device over adb, then hit ↻.</div>';
+      $('count').innerHTML='<b>0</b> Flutter apps';return;
+    }
+    devs.forEach(d=>{var o=document.createElement('option');o.value=d.serial;
+      o.textContent=d.serial+(d.root?'   ✓ root':'   ✗ no root');o.dataset.root=d.root;sel.appendChild(o);});
+    updateRoot();scanApps();
+  };
+  function updateRoot(){var o=$('dev').selectedOptions[0];var r=o&&o.dataset.root==='true';
+    var p=$('rootPill');p.textContent=r?'✓ root':'✗ no root';p.className='pill '+(r?'ok':'bad');}
+  function scanApps(){
+    updateRoot(); ICONS={};
+    $('cards').innerHTML='<div class="empty"><div class="big">⟳</div><b>Scanning…</b>Looking for libflutter.so in installed apps.</div>';
+    $('count').innerHTML='scanning…';
+    window.pywebview.api.scan($('dev').value); /* fire-and-forget — results arrive via fiApps() */
+  }
+  window.fiApps=function(apps){
+    APPS=apps||[]; renderCards();
+    try{ if(window.pywebview&&APPS.length) window.pywebview.api.fetch_icons($('dev').value, APPS.map(function(a){return a.pkg;})); }catch(e){}
+  };
+  function renderCards(){
+    var f=$('filter').value.toLowerCase(), c=$('cards');
+    var items=APPS.filter(a=>a.pkg.toLowerCase().includes(f)||(a.name||'').toLowerCase().includes(f));
+    $('count').innerHTML='<b>'+items.length+'</b> Flutter app'+(items.length===1?'':'s')+(f?' (filtered)':'');
+    c.innerHTML='';
+    if(!items.length){
+      c.innerHTML='<div class="empty"><div class="big">'+(APPS.length?'⌕':'⬡')+'</div><b>'+
+        (APPS.length?'No matches':'No Flutter apps found')+'</b>'+
+        (APPS.length?'Nothing matches “'+f+'”.':'Scan a device with Flutter apps installed.')+'</div>';return;
+    }
+    items.forEach(a=>{
+      var d=document.createElement('div');d.className='card';d.dataset.pkg=a.pkg;
+      var av=ICONS[a.pkg]
+        ? '<div class="av img"><img src="'+ICONS[a.pkg]+'" alt=""></div>'
+        : '<div class="av" style="'+avStyle(a.pkg)+'">'+(a.name||a.pkg).slice(0,1).toUpperCase()+'</div>';
+      d.innerHTML=av+
+        '<div class="body"><h3>'+(a.name||a.pkg.split('.').pop())+'</h3><p>'+a.pkg+'</p>'+
+        '<div class="chips"><span class="chip fl">FLUTTER</span>'+(a.size?'<span class="chip sz">'+a.size+'</span>':'')+'</div></div>'+
+        '<span class="go">▶</span>';
+      d.onclick=()=>startIntercept(a.pkg,a.name||a.pkg);c.appendChild(d);
+    });
+  }
+  window.fiIcon=function(pkg,url){
+    ICONS[pkg]=url;
+    var card=document.querySelector('.card[data-pkg="'+pkg+'"]');
+    if(card){var av=card.querySelector('.av'); if(av){av.className='av img'; av.removeAttribute('style'); av.innerHTML='<img src="'+url+'" alt="">';}}
+  };
+
+  /* ----- start / stop ----- */
+  async function startIntercept(pkg,name){
+    if(!$('dev').value){toast('No device selected','bad');return;}
+    $('mApp').textContent=name||pkg; $('mProxy').textContent='PC :'+$('port').value; $('mUptime').textContent='—';
+    $('mTraffic').textContent='—'; $('mTraffic').style.color='';
+    showView('activity'); $('log').innerHTML=''; fiStatus('starting','Starting '+pkg+'…');
+    toast('Starting '+(name||pkg)+'…');
+    var r=await window.pywebview.api.start($('dev').value,pkg,OPTS.ssl,OPTS.root,OPTS.vpn,$('port').value,OPTS.mode,OPTS.antifrida,OPTS.stealth,OPTS.mitmcap);
+    if(r&&!r.ok){fiStatus('err',r.err||'failed');toast(r.err||'Failed to start','bad');}
+  }
+  /* ----- captured requests ----- */
+  var REQS=[], REQ_PAUSE=false, REQ_SEL=-1;
+  function clearReqs(){ REQS=[]; REQ_SEL=-1; renderReqs(); $('reqdetail').classList.remove('on'); $('reqBadge').textContent=0; }
+  function togPause(){ REQ_PAUSE=!REQ_PAUSE; $('sw_pause').classList.toggle('on',REQ_PAUSE); toast('Capture '+(REQ_PAUSE?'paused':'resumed')); }
+  function shortTime(){ var d=new Date(); return ('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2)+':'+('0'+d.getSeconds()).slice(-2); }
+  window.fiReq=function(obj){
+    if(!obj || REQ_PAUSE) return;
+    obj.t=shortTime(); REQS.push(obj); if(REQS.length>1000) REQS.shift();
+    $('reqBadge').textContent=REQS.length; renderReqs();
+  };
+  function reqMethod(r){ return (r.method||(r.dir==='in'?'RESP':'?')).toUpperCase(); }
+  function renderReqs(){
+    var f=($('reqFilter')&&$('reqFilter').value||'').toLowerCase();
+    var items=REQS.map(function(r,i){return {r:r,i:i};}).filter(function(o){
+      if(!f) return true; var r=o.r; return ((r.url||'')+' '+reqMethod(r)+' '+(r.data||'')).toLowerCase().indexOf(f)>=0; });
+    var l=$('reqlist'); $('reqCount').textContent=REQS.length+' captured'+(f?' ('+items.length+' shown)':'');
+    if(!REQS.length){ l.innerHTML='<div class="empty" style="padding:40px"><div class="big">⇄</div><b>No requests captured yet</b>Start intercepting an app and use it. Captured HTTPS (where readable) appears here; Burp shows everything.</div>'; return; }
+    if(!items.length){ l.innerHTML='<div class="empty" style="padding:40px"><b>No matches</b>Nothing matches “'+f+'”.</div>'; return; }
+    l.innerHTML='';
+    items.reverse().forEach(function(o){
+      var r=o.r, idx=o.i, m=reqMethod(r);
+      var row=document.createElement('div'); row.className='reqrow'+(idx===REQ_SEL?' sel':'');
+      row.innerHTML='<span class="m '+m+'">'+m+'</span><span class="u">'+(r.url||r.first||'')+'</span><span class="tm">'+r.t+'</span>';
+      row.onclick=function(){ showReq(idx,row); };
+      l.appendChild(row);
+    });
+  }
+  function prettyBody(data){
+    if(!data) return '(no body captured)';
+    var i=data.indexOf('\r\n\r\n'); if(i<0) i=data.indexOf('\n\n');
+    var head=i>=0?data.slice(0,i):'', body=i>=0?data.slice(i).trim():data;
+    // pretty-print a JSON body if it is one
+    try{ var t=body.trim(); if((t[0]==='{'||t[0]==='[')){ body=JSON.stringify(JSON.parse(t),null,2); } }catch(e){}
+    return head?(head+'\n\n'+body):body;
+  }
+  function showReq(idx,row){
+    REQ_SEL=idx;
+    document.querySelectorAll('.reqrow.sel').forEach(x=>x.classList.remove('sel')); if(row)row.classList.add('sel');
+    var r=REQS[idx]; var d=$('reqdetail'); d.classList.add('on');
+    d.textContent=(r.method?(r.method+' '+(r.url||'')+'\n\n'):'')+prettyBody(r.data||r.first||'');
+  }
+  function copyReq(){
+    if(REQ_SEL<0||!REQS[REQ_SEL]){ toast('Select a request first','bad'); return; }
+    var r=REQS[REQ_SEL], txt=(r.method?(r.method+' '+(r.url||'')+'\n\n'):'')+(r.data||r.first||'');
+    try{ window.pywebview.api.copy(txt); toast('Copied to clipboard','ok'); }catch(e){ toast('copy failed','bad'); }
+  }
+  function exportReqs(){
+    if(!REQS.length){ toast('Nothing to export','bad'); return; }
+    window.pywebview.api.export_requests(REQS).then(function(r){ toast(r&&r.ok?('Exported '+r.n+' → '+r.path):'export failed', r&&r.ok?'ok':'bad'); });
+  }
+  /* ----- compatibility report ----- */
+  function rsec(t,body){ return '<div class="rsec"><div class="rsec-t">'+t+'</div>'+body+'</div>'; }
+  window.fiDiag=function(r){
+    if(!r) return;
+    function chips(a,cls){ return (a&&a.length)? a.map(function(x){return '<span class="rchip '+(cls||'')+'">'+x+'</span>';}).join('') : '<span class="rmut">none detected</span>'; }
+    function yn(b){ return b?'<span class="rchip ok">yes</span>':'<span class="rchip bad">no</span>'; }
+    var fl=r.flutter||{};
+    var hooks=(r.hooks||[]).map(function(h){return '<div class="rrow"><span class="'+(h.ok?'ok':'bad')+'">'+(h.ok?'✓':'✗')+'</span> '+h.name+(h.note?' <span class="rmut">('+h.note+')</span>':'')+'</div>';}).join('')||'<span class="rmut">none reported</span>';
+    var recs=(r.recommend||[]).map(function(x){return '<li>'+x+'</li>';}).join('');
+    var h='';
+    h+=rsec('Environment','<div class="rrow">ABI: <b>'+(r.arch||'?')+'</b> &middot; platform: <b>'+(r.platform||'?')+'</b> &middot; app: <b>'+(r.pkg||'?')+'</b></div>');
+    h+=rsec('Flutter', fl.lib? ('<div class="rrow">'+fl.lib+(fl.dart?' &middot; '+fl.dart:'')+(fl.engine?'<br><span class="rmut">'+fl.engine+'</span>':'')+'</div>') : '<span class="rmut">libflutter.so not detected</span>');
+    h+=rsec('SSL / TLS backends', chips(r.ssl,'acc'));
+    h+=rsec('Networking libraries', chips(r.net,'acc'));
+    h+=rsec('RASP / protection frameworks', chips(r.rasp,'warn'));
+    h+=rsec('Root frameworks', chips(r.root,'warn'));
+    h+=rsec('Hook status', hooks);
+    h+=rsec('Proxy / traffic','<div class="rrow">proxy PC:'+r.port+' listening: '+yn(r.proxy_listening)+' &middot; SSL hook confirmed: '+yn(r.ssl_ok)+'</div>');
+    if(recs) h+=rsec('Recommended fixes','<ul class="rlist">'+recs+'</ul>');
+    $('reportBody').innerHTML=h;
+  };
+  function mirror(){
+    if(!$('dev').value){toast('Select a device first','bad');return;}
+    toast('Opening screen mirror…');
+    try{ window.pywebview.api.mirror($('dev').value); }catch(e){ toast('scrcpy launch failed','bad'); }
+  }
+  async function stopIntercept(){
+    toast('Stopping & restoring device…');
+    await window.pywebview.api.stop();
+    $('mApp').textContent='—';$('mProxy').textContent='—';
+    toast('Device restored to normal','ok');
+  }
+
+  window.addEventListener('pywebviewready',function(){READY=true;loadDevices();});
+  $('dev').addEventListener('change',scanApps);
+</script>
+</body>
+</html>
