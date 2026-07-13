@@ -135,6 +135,12 @@
   .chip.sz{color:var(--mut2);background:#23262f;border:1px solid var(--line)}
   .card .go{position:absolute;right:13px;top:50%;transform:translateY(-50%) translateX(-4px);color:var(--mut);font-size:16px;opacity:0;transition:.16s}
   .card:hover .go{opacity:1;transform:translateY(-50%) translateX(0);color:var(--acc2)}
+  .card .buildbtn{position:absolute;right:34px;top:50%;transform:translateY(-50%);font-size:9.5px;font-weight:700;
+    background:#15121c;border:1px solid #3a2f5e;color:#cbb6ff;border-radius:7px;padding:5px 9px;cursor:pointer;
+    opacity:0;transition:.16s;white-space:nowrap;z-index:2}
+  .card .buildbtn:hover{background:#241a3a;border-color:var(--acc);color:#fff}
+  .card:hover .buildbtn{opacity:1}
+  .buildbtn.on{color:var(--ok);border-color:#1f4d3c;background:#0f2a20}
   .empty{color:var(--mut);padding:48px 20px;text-align:center;grid-column:1/-1}
   .empty .big{font-size:34px;opacity:.5;margin-bottom:10px}
   .empty b{color:var(--ink2);display:block;margin-bottom:5px;font-size:15px}
@@ -266,13 +272,22 @@
         <div class="toggle on" id="sw_auto" onclick="togAuto()"><span class="tk"></span>Auto-recover on crash</div>
         <div class="toggle on" id="sw_antifrida" onclick="tog('antifrida')" title="Universal anti-detection: anti-ptrace + keep-alive + frida-hide. Helps most apps; safe to leave on."><span class="tk"></span>Anti-detection</div>
         <div class="toggle" id="sw_stealth" onclick="tog('stealth')" title="Experimental: run frida-server under a hidden name + non-standard port (uses attach). Try this ONLY if an app detects frida-server and crashes; leave off for normal apps."><span class="tk"></span>Stealth (experimental)</div>
-        <div class="toggle" id="sw_mitmcap" onclick="tog('mitmcap')" title="In-tool capture proxy: the tool decrypts traffic itself and shows ALL requests (incl. pure-Dart) in the Requests tab — no Burp needed. Uses the proxy port."><span class="tk"></span>Capture proxy</div>
+        <div class="toggle on" id="sw_mitmcap" onclick="tog('mitmcap')" title="In-tool capture proxy: the tool decrypts traffic itself and shows ALL requests (incl. pure-Dart) in the Requests tab — no Burp needed. Uses the proxy port. ON by default so you get requests without Burp."><span class="tk"></span>Capture proxy</div>
         <div class="vline"></div>
         <span class="cfg-label">Mode</span>
         <div class="seg" id="seg"><div class="on" data-m="spawn" onclick="setMode('spawn')">Spawn</div><div data-m="attach" onclick="setMode('attach')">Attach</div></div>
         <div class="vline"></div>
         <span class="cfg-label">Proxy</span>
         <div class="portbox"><span>PC :</span><input id="port" value="8080"></div>
+        <div class="vline"></div>
+        <span class="cfg-label">Burp IP</span>
+        <div class="portbox" title="Your PC LAN IP for the reFlutter chain (auto-detected if empty)"><span>IP :</span>
+          <input id="burpip" placeholder="auto" style="min-width:96px;width:96px"></div>
+        <span class="pill" id="reflutherHint" title="Root-free patched-APK chain via reFlutter">🔧 reFlutter ready</span>
+        <div class="vline"></div>
+        <span class="cfg-label">reFlutter (no root)</span>
+        <input id="reflPkg" placeholder="package name… (e.g. com.example.app)" style="min-width:220px">
+        <button class="btn ghost" onclick="buildReflutterManual()" style="padding:9px 13px" title="Build, sign &amp; install a patched APK that sends traffic to Burp. No root needed.">🔧 Build patched APK</button>
       </div>
 
       <div class="gridhead">
@@ -385,7 +400,7 @@
 <div class="toasts" id="toasts"></div>
 
 <script>
-  var OPTS={ssl:true,root:true,vpn:false,mode:"spawn",antifrida:true,stealth:false,mitmcap:false}, APPS=[], READY=false, ICONS={};
+  var OPTS={ssl:true,root:true,vpn:false,mode:"spawn",antifrida:true,stealth:false,mitmcap:true}, APPS=[], READY=false, ICONS={};
   var STATE="idle", upStart=0, upTimer=null;
   function $(id){return document.getElementById(id)}
 
@@ -501,14 +516,56 @@
       d.innerHTML=av+
         '<div class="body"><h3>'+(a.name||a.pkg.split('.').pop())+'</h3><p>'+a.pkg+'</p>'+
         '<div class="chips"><span class="chip fl">FLUTTER</span>'+(a.size?'<span class="chip sz">'+a.size+'</span>':'')+'</div></div>'+
-        '<span class="go">▶</span>';
-      d.onclick=()=>startIntercept(a.pkg,a.name||a.pkg);c.appendChild(d);
+        '<span class="go">▶</span>'+
+        '<button class="buildbtn" title="Root-free: build a patched &amp; signed APK that sends traffic to Burp (reFlutter). No root needed.">🔧 Build patched</button>';
+      d.onclick=()=>startIntercept(a.pkg,a.name||a.pkg);
+      var bb=d.querySelector('.buildbtn');
+      if(bb) bb.onclick=function(ev){ ev.stopPropagation(); buildReflutter(a.pkg,a.name||a.pkg,bb); };
+      c.appendChild(d);
     });
   }
   window.fiIcon=function(pkg,url){
     ICONS[pkg]=url;
     var card=document.querySelector('.card[data-pkg="'+pkg+'"]');
     if(card){var av=card.querySelector('.av'); if(av){av.className='av img'; av.removeAttribute('style'); av.innerHTML='<img src="'+url+'" alt="">';}}
+  };
+
+  /* ----- reFlutter root-free build chain ----- */
+  function buildReflutterManual(){
+    var pkg=($('reflPkg').value||'').trim();
+    if(!pkg){toast('enter a package name (or scan + use a card)','bad');return;}
+    if(!$('dev').value){toast('No device selected','bad');return;}
+    $('mApp').textContent=pkg; $('mProxy').textContent='reFlutter -> Burp'; $('mUptime').textContent='—';
+    $('mTraffic').textContent='—'; $('mTraffic').style.color='';
+    toast('Building patched APK (root-free)…');
+    try{ window.pywebview.api.build_reflutter($('dev').value,pkg,($('burpip').value||'').trim(),true); }
+    catch(e){ toast('build_reflutter failed: '+e,'bad'); }
+  }
+  function buildReflutter(pkg,name,btn){
+    if(!$('dev').value){toast('No device selected','bad');return;}
+    if(btn){btn.classList.add('on');btn.textContent='🔧 Building…';}
+    $('mApp').textContent=name||pkg; $('mProxy').textContent='reFlutter -> Burp'; $('mUptime').textContent='—';
+    $('mTraffic').textContent='—'; $('mTraffic').style.color='';
+    if(btn) btn.setAttribute('disabled','disabled');
+    toast('Building patched APK (root-free)…');
+    try{
+      window.pywebview.api.build_reflutter($('dev').value,pkg,($('burpip').value||'').trim(),true);
+    }catch(e){ toast('build_reflutter failed: '+e,'bad'); if(btn){btn.classList.remove('on');btn.textContent='🔧 Build patched';btn.removeAttribute('disabled');} }
+  }
+  window.fiBuildReflutterView=function(pkg){
+    showView('activity'); $('log').innerHTML=''; fiStatus('starting','Building patched APK…');
+  };
+  window.fiReflutterResult=function(r){
+    fiStatus(r&&r.ok?'active':'err', r&&r.ok?'Patched APK ready':(r&&r.error||'failed'));
+    r=r||{};
+    if(r.ok){
+      toast('Patched APK built &amp; installed','ok');
+      var b=document.querySelector('.card[data-pkg="'+(r.signed_apk||'')+'"] .buildbtn, .buildbtn');
+      document.querySelectorAll('.buildbtn').forEach(function(x){x.classList.remove('on');x.textContent='🔧 Build patched';x.removeAttribute('disabled');});
+    } else {
+      toast(r.error||'build failed','bad');
+      document.querySelectorAll('.buildbtn').forEach(function(x){x.classList.remove('on');x.textContent='🔧 Build patched';x.removeAttribute('disabled');});
+    }
   };
 
   /* ----- start / stop ----- */

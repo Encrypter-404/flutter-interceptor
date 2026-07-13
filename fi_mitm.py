@@ -8,7 +8,11 @@ request/response to a callback for the tool's Requests tab.
 
 Works for ANY app (Flutter/Dart, Cronet, OkHttp, native) with no per-version byte patterns.
 """
-import os, ssl, socket, threading, datetime, ipaddress
+import os, ssl, socket, threading, datetime, ipaddress, gzip, zlib
+try:
+    import brotli as _brotli            # optional: pip install brotli — for br-encoded bodies
+except Exception:
+    _brotli = None
 
 try:
     from cryptography import x509
@@ -78,6 +82,33 @@ class CertStore:
                     serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()))
             self._leaf[host] = (cf, kf)
             return cf, kf
+
+
+def _decode_display(raw):
+    """Split an HTTP message into head + a HUMAN-READABLE body: decompress gzip/deflate/br so the
+    Requests tab shows real JSON/text instead of binary gibberish. Best-effort; never raises.
+    The bytes actually relayed to the app are untouched — this only affects what we DISPLAY."""
+    try:
+        i = raw.find(b"\r\n\r\n")
+        if i < 0: return raw.decode("latin1", "replace")
+        head = raw[:i + 4]; body = raw[i + 4:]
+        enc = b""
+        for line in head.split(b"\r\n"):
+            if line.lower().startswith(b"content-encoding:"):
+                enc = line.split(b":", 1)[1].strip().lower(); break
+        try:
+            if b"gzip" in enc or b"x-gzip" in enc:
+                body = gzip.decompress(body)
+            elif b"deflate" in enc:
+                try: body = zlib.decompress(body)
+                except Exception: body = zlib.decompress(body, -zlib.MAX_WBITS)
+            elif b"br" in enc and _brotli is not None:
+                body = _brotli.decompress(body)
+        except Exception:
+            pass   # truncated/partial body (we cap reads) — show what we have, undecoded
+        return head.decode("latin1", "replace") + body.decode("utf-8", "replace")
+    except Exception:
+        return raw.decode("latin1", "replace")
 
 
 def _safe(h): return "".join(c if c.isalnum() or c in ".-" else "_" for c in h)[:60]
@@ -214,7 +245,14 @@ class MitmProxy:
         # temp default cert so the handshake can start; real cert chosen after SNI via a fresh ctx
         # simpler: do a first peek of SNI ourselves, then build ctx with the right cert
         sni = _peek_sni(client)
-        host = sni or "localhost"
+        if not sni:
+            # No SNI in the ClientHello: the app connected to a bare IP or used ECH/ESNI. Because the
+            # traffic reaches us through an iptables REDIRECT + adb-reverse tunnel, the ORIGINAL
+            # destination is already lost, so we can't know where to forward. Report it instead of
+            # silently dropping — this is a known blind spot for IP-direct / no-SNI TLS.
+            self.log("[!] capture: a TLS connection had NO SNI (bare-IP or ECH) — can't route it; that request won't appear. (rare; most apps use SNI)")
+            client.close(); return
+        host = sni
         if self._debug: self.log("[mitm] conn SNI=%s" % host)
         cf, kf = self.store.leaf(host)
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -228,15 +266,25 @@ class MitmProxy:
             if self._debug: self.log("[mitm] client TLS handshake FAILED for %s: %s" % (host, e))
             client.close(); return
         if self._debug: self.log("[mitm] client TLS OK (%s), dialing upstream…" % host)
-        # connect upstream (real server) with TLS, no verify (we're already MITMing)
-        try:
-            up_raw = socket.create_connection((host, 443), timeout=20)
-            uctx = ssl._create_unverified_context()
-            try: uctx.set_alpn_protocols(["http/1.1"])
-            except Exception: pass
-            up = uctx.wrap_socket(up_raw, server_hostname=host if not _is_ip(host) else None)
-        except Exception as e:
-            if self._debug: self.log("[mitm] upstream %s:443 FAILED: %s" % (host, e))
+        # connect upstream (real server) with TLS, no verify (we're already MITMing).
+        # The iptables REDIRECT flattens the original destination PORT, so we don't know if the app
+        # dialed 443 or an alt-TLS port. Try the ports the routing redirects (443 then 8443) so
+        # non-standard-port APIs (api.host:8443, :8443 gateways) stop silently vanishing.
+        up = None
+        for uport in (443, 8443):
+            try:
+                up_raw = socket.create_connection((host, uport), timeout=15)
+                uctx = ssl._create_unverified_context()
+                try: uctx.set_alpn_protocols(["http/1.1"])
+                except Exception: pass
+                up = uctx.wrap_socket(up_raw, server_hostname=host if not _is_ip(host) else None)
+                if self._debug and uport != 443: self.log("[mitm] upstream %s reached on alt port %d" % (host, uport))
+                break
+            except Exception as e:
+                if self._debug: self.log("[mitm] upstream %s:%d failed: %s" % (host, uport, e))
+                continue
+        if up is None:
+            self.log("[!] capture: could not reach upstream %s (tried 443, 8443) — request dropped" % host)
             try: tls_client.close()
             except Exception: pass
             return
@@ -263,6 +311,10 @@ class MitmProxy:
     def _pump_http(self, client, up, host, scheme):
         try:
             crf = client.makefile("rb")
+            # both readers created ONCE: their read-ahead buffers must persist across keep-alive
+            # requests. Re-creating urf each loop discarded bytes it had buffered for the NEXT
+            # response, corrupting the 2nd+ request on a reused connection (intermittent loss).
+            urf = up.makefile("rb")
             while self._alive:
                 first, hdrs, raw = _read_headers(crf)
                 if not first: break
@@ -273,7 +325,6 @@ class MitmProxy:
                 if hdrs and b"websocket" in hdrs.get(b"upgrade", b"").lower():
                     self._relay_ws(client, up, host); return
                 # response
-                urf = up.makefile("rb")
                 rfirst, rhdrs, rraw = _read_headers(urf)
                 if not rfirst: break
                 rbody = _read_body(urf, rhdrs)
@@ -325,7 +376,7 @@ class MitmProxy:
 
     def _emit(self, direction, first, host, scheme, raw):
         try:
-            text = raw.decode("latin1", "replace")
+            text = _decode_display(raw)   # decompress gzip/br/deflate so the body is readable
             method = None; url = first
             if direction == "out":
                 p = first.split(" ")

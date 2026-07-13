@@ -412,6 +412,40 @@ wait'''
         threading.Thread(target=self._run,args=(pkg,),daemon=True).start()
         return {"ok":True}
 
+    # ---- reFlutter one-click chain (root-free path to Burp) ----
+    # Builds a patched, signed, installable APK from the app's installed package on the phone,
+    # no root needed. sidesteps the root/frida requirement entirely. see fi_reflutter.py.
+    def build_reflutter(self,serial,pkg,burp_host=None,do_install=True):
+        self.serial=serial
+        threading.Thread(target=self._build_reflutter,args=(serial,pkg,burp_host,bool(do_install)),daemon=True).start()
+        return {"ok":True}
+
+    def _build_reflutter(self,serial,pkg,burp_host,do_install):
+        try:
+            import fi_reflutter
+            fi_reflutter.set_serial(serial or None)
+            self._ui("fiBuildReflutterView(%s)"%json.dumps(pkg))
+            self.log("[*] reFlutter one-click chain -> Burp  (pkg=%s, install=%s)"%(pkg,do_install))
+            self.log("[*] This is root-free: pulls the APK, disables TLS via reFlutter, re-signs, installs.")
+            r=fi_reflutter.run_chain(pkg=pkg, burp_host=(burp_host or None),
+                                     do_install=do_install, log=lambda m: self.log(m))
+            self._ui("fiReflutterResult(%s)"%json.dumps(r))
+            if r.get("ok"):
+                self.log("[+] DONE: patched APK ready.")
+                if r.get("mode")=="socket":
+                    self.log("    -> add a Burp listener on %s:8083 (all ifaces) + enable "
+                             "'Support invisible proxying'. Launch the app -> requests appear."%r.get("burp_host","PC"))
+                else:
+                    self.log("    -> newer Flutter: set the phone Wi-Fi HTTP proxy (or a no-root VPN) "
+                             "to %s:8083, then launch the app."%r.get("burp_host","PC"))
+            else:
+                self.log("[!] chain did not complete: %s"%(r.get("error") or r.get("note") or "unknown"))
+                if r.get("note") and "unsupported" in r.get("error",""):
+                    self.log("[*] TIP: this engine isn't in reFlutter's hash DB. Use the on-device "
+                             "Intercept path instead (the byte-pattern + Java unpin already cover most builds).")
+        except Exception as e:
+            self.log("[!] reFlutter chain error: %s"%e); tlog(traceback.format_exc())
+
     def _start_mitm(self):
         """Start the in-tool TLS MITM capture proxy on the proxy port (captures ALL apps incl pure-Dart)."""
         try: import fi_mitm
@@ -511,11 +545,19 @@ wait'''
         rep["proxy_listening"]=self._proxy_up()
         hooks=d.get("hooks",[]) or []
         rep["ssl_ok"]=any(h.get("ok") for h in hooks) or self._ssl_hooked
+        is_flutter=bool(d.get("flutter"))
         recs=[]
         if d.get("rasp"):
             recs.append("RASP present (%s). If the app crashes: enable Stealth or Attach mode. Hardcore RASP (libts) may be uninterceptable."%", ".join(d["rasp"]))
-        if not rep["ssl_ok"]:
-            recs.append("No SSL hook confirmed yet — libflutter may load late; wait a few seconds or use Attach mode.")
+        if not rep["ssl_ok"] and is_flutter:
+            # THE #1 reason for 'no requests': libflutter loaded but no byte-pattern matched its
+            # ssl_verify_peer_cert, so TLS stayed PINNED and the MITM handshake is rejected.
+            recs.append("⚠ TLS still PINNED: libflutter.so is present but ssl_verify_peer_cert was NOT patched — "
+                        "this is almost always why you see ZERO requests. Usually the app's Flutter/Dart version is "
+                        "newer than the unpin byte-patterns. Wait ~10s (libflutter can load late); if still unpatched, "
+                        "the patterns need updating for this Flutter version (see the engine log for 'no pattern matched').")
+        elif not rep["ssl_ok"]:
+            recs.append("No SSL hook confirmed yet — libflutter/libssl may load late; wait a few seconds or use Attach mode.")
         if not rep["proxy_listening"]:
             recs.append("No proxy on PC:%d — start Burp with an INVISIBLE listener on :%d."%(self.port,self.port))
         if not d.get("ssl"):

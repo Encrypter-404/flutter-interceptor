@@ -8,3 +8,14 @@ __pycache__/
 *.pyc
 .venv/
 env/
+# reFlutter chain artifacts (large binaries / per-app output — re-fetched/generated locally)
+patched/
+*.apk
+*.ipa
+*.keystore
+enginehash.csv
+libappTmp/
+release/
+release.RE.*
+# bundled helper JARs are committed (APKEditor, uber-apk-signer) so the chain works out-of-the-box
+# ADB binaries are intentionally kept (part of the tool)
