@@ -209,18 +209,43 @@ def sign(apk, log, final_dir=None):
 
 
 def install(apk, pkg, log, replace=True):
-    """Uninstall original (ignore failure) then adb install -r the patched APK. No root needed."""
+    """Uninstall original (ignore failure) then adb install -r the patched APK. No root needed.
+    Returns (bool ok, str reason) where reason classifies signature/parse/verification failures so
+    the GUI can guide the user (e.g. 'use the live intercept path instead')."""
     _adb(["uninstall", pkg], log)   # ignore rc — may fail if data must stay
     rc, out = _adb(["install", "-r", apk], log, timeout=300)
-    if rc != 0:
-        log("[!] install failed (rc=%d)" % rc)
-        log((out or ""))
-        return False
-    if "Failure" in out:
-        log("[!] install reported Failure:\n" + out)
-        return False
+    txt = (out or "")
+    low = txt.lower()
+    # classify common install failures
+    if rc != 0 and not low:
+        return False, "adb_install_error"
+    if "INSTALL_FAILED_VERIFICATION_FAILURE" in txt or "INSTALL_FAILED_VERIFIER_FAILURE" in txt:
+        log("[!] install: VERIFICATION_FAILURE — the OS/app refused the re-signed APK (signature/integrity check).")
+        log("[!] -> This app protects its signature. Use the live intercept path instead (needs root).")
+        return False, "signature_protected"
+    if "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in txt or "INSTALL_FAILED_ALREADY_EXISTS" in txt:
+        # old signature still on device; force uninstall then retry once
+        log("[*] signature clash with installed app — force-uninstalling and retrying…")
+        _adb(["uninstall", pkg], log)
+        rc2, out2 = _adb(["install", apk], log, timeout=300)
+        if rc2 == 0 and "Failure" not in (out2 or ""):
+            log("[+] installed after clean reinstall: " + pkg + "  (app data was wiped)")
+            return True, "ok_reinstalled"
+        log("[!] install still failed after clean reinstall:\n" + (out2 or ""))
+        return False, "install_clash"
+    if "INSTALL_PARSE_FAILED" in txt:
+        log("[!] install: PARSE_FAILED — the patched APK is malformed (reFlutter/merge issue).")
+        return False, "parse_failed"
+    if "Failure" in txt or rc != 0:
+        # generic Failure [INSTALL_FAILED_*: ...] — surface the exact reason
+        line = next((l for l in txt.splitlines() if "Failure" in l), txt.strip())
+        log("[!] install reported: " + line)
+        if "INSUFFICIENT_STORAGE" in txt: return False, "no_space"
+        if "OLDER_SDK" in txt: return False, "sdk_too_old"
+        if "INCOMPATIBLE" in txt: return False, "incompatible"
+        return False, "install_failed"
     log("[+] installed: " + pkg)
-    return True
+    return True, "ok"
 
 
 def run_chain(pkg=None, apk=None, burp_host=None, do_install=True, log=None):
@@ -314,8 +339,13 @@ def run_chain(pkg=None, apk=None, burp_host=None, do_install=True, log=None):
         # 5) install
         if do_install and pkg:
             log("== 4/5 installing patched APK (no root needed) ==")
-            ok = install(signed, pkg, log)
+            ok, reason = install(signed, pkg, log)
             result["installed"] = ok
+            result["install_reason"] = reason
+            if not ok and reason == "signature_protected":
+                result["notes"].append("SIGNATURE-PROTECTED: this app verifies its own signature, "
+                    "so the re-signed APK is rejected. Use the live on-device intercept path "
+                    "(needs rooted device) — see the Intercept tab.")
         else:
             log("[*] skipping install (signed APK ready at " + signed + ")")
 

@@ -408,7 +408,8 @@ wait'''
     def start(self,serial,pkg,ssl,root,vpn,port,mode,antifrida=False,stealth=False,mitmcap=False):
         self.serial=serial; self.port=int(port or 8080)
         self.opts={"ssl":bool(ssl),"root":bool(root),"vpn":bool(vpn),"mode":mode or "spawn",
-                   "antifrida":bool(antifrida),"stealth":bool(stealth),"mitmcap":bool(mitmcap)}
+                   "antifrida":bool(antifrida),"stealth":bool(stealth),"mitmcap":bool(mitmcap),
+                   "expunpin":False}
         threading.Thread(target=self._run,args=(pkg,),daemon=True).start()
         return {"ok":True}
 
@@ -438,11 +439,20 @@ wait'''
                 else:
                     self.log("    -> newer Flutter: set the phone Wi-Fi HTTP proxy (or a no-root VPN) "
                              "to %s:8083, then launch the app."%r.get("burp_host","PC"))
+                if r.get("installed") is False:
+                    self.log("[!] install did not succeed (%s). The patched APK is saved in ./patched/ — "
+                             "you can install it manually, or via the live intercept path."%r.get("install_reason","?"))
             else:
-                self.log("[!] chain did not complete: %s"%(r.get("error") or r.get("note") or "unknown"))
-                if r.get("note") and "unsupported" in r.get("error",""):
-                    self.log("[*] TIP: this engine isn't in reFlutter's hash DB. Use the on-device "
-                             "Intercept path instead (the byte-pattern + Java unpin already cover most builds).")
+                err = r.get("error") or ""
+                self.log("[!] chain did not complete: %s"%(err or r.get("note") or "unknown"))
+                if "unsupported" in err:
+                    self.log("[*] The app's Flutter engine isn't in reFlutter's hash DB yet.")
+                    self.log("[*] FALLBACK: use the on-device Intercept path (pick the app above). The "
+                             "bundle's byte-pattern + Java unpin + the new version-independent handshake.cc "
+                             "locator cover most builds. Needs root (KernelSU/Magisk -> grant Shell).")
+                elif r.get("install_reason")=="signature_protected":
+                    self.log("[*] The app rejects the re-signed APK (signature self-check). The root-free "
+                             "chain can't help here. Use the on-device Intercept path (needs root).")
         except Exception as e:
             self.log("[!] reFlutter chain error: %s"%e); tlog(traceback.format_exc())
 
@@ -688,6 +698,7 @@ wait'''
         self.session=dev.attach(pid); self.log("[*] target pid %d"%pid)
         self.session.on('detached', self._on_detached)  # detect app close/crash
         optsjs="globalThis.FI_OPTS=%s;\n"%json.dumps({k:self.opts[k] for k in ("ssl","root","vpn")})
+        optsjs+="globalThis.FI_EXPERIMENTAL_UNPIN=%s;\n"%("1" if self.opts.get("expunpin") else "0")
         # ROOT-CAUSE guard for the "access violation" noise: wrap Memory.scan(Sync) so a scan that
         # hits an unreadable/guard page just skips that range (returns nothing) instead of throwing.
         # Runs BEFORE the bundle, so the bundle's pattern search no longer surfaces that error,

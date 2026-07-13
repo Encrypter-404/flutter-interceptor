@@ -8,7 +8,7 @@ request/response to a callback for the tool's Requests tab.
 
 Works for ANY app (Flutter/Dart, Cronet, OkHttp, native) with no per-version byte patterns.
 """
-import os, ssl, socket, threading, datetime, ipaddress, gzip, zlib
+import os, ssl, socket, threading, datetime, ipaddress, gzip, zlib, select
 try:
     import brotli as _brotli            # optional: pip install brotli — for br-encoded bodies
 except Exception:
@@ -22,6 +22,15 @@ try:
     _HAVE_CRYPTO = True
 except Exception:
     _HAVE_CRYPTO = False
+
+try:
+    import h2.connection
+    import h2.events
+    import h2.config
+    import h2.exceptions
+    _HAVE_H2 = True
+except Exception:
+    _HAVE_H2 = False
 
 
 # ---------------------------------------------------------------- CA / leaf certs
@@ -115,6 +124,9 @@ def _safe(h): return "".join(c if c.isalnum() or c in ".-" else "_" for c in h)[
 def _is_ip(h):
     try: ipaddress.ip_address(h); return True
     except Exception: return False
+def _is_closed(s):
+    try: return s.fileno() < 0
+    except Exception: return True
 
 
 # ---------------------------------------------------------------- HTTP / WS helpers
@@ -258,24 +270,33 @@ class MitmProxy:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         try: ctx.load_cert_chain(cf, kf)
         except Exception as e: self.log("[!] mitm cert load: %s" % e); client.close(); return
-        try: ctx.set_alpn_protocols(["http/1.1"])   # force HTTP/1.1 (our parser); avoids app negotiating h2
-        except Exception: pass
+        # Offer both h2 and http/1.1 so the app can pick. h2 (incl. gRPC) is bridged via the h2 lib;
+        # http/1.1 goes through the keep-alive pump. Falls back to http/1.1 only if h2 lib missing.
+        try:
+            ctx.set_alpn_protocols(["h2", "http/1.1"] if _HAVE_H2 else ["http/1.1"])
+        except Exception:
+            try: ctx.set_alpn_protocols(["http/1.1"])
+            except Exception: pass
         try:
             tls_client = ctx.wrap_socket(client, server_side=True)
         except Exception as e:
             if self._debug: self.log("[mitm] client TLS handshake FAILED for %s: %s" % (host, e))
             client.close(); return
-        if self._debug: self.log("[mitm] client TLS OK (%s), dialing upstream…" % host)
+        client_alpn = ""
+        try: client_alpn = tls_client.selected_alpn_protocol() or ""
+        except Exception: pass
+        if self._debug: self.log("[mitm] client TLS OK (%s, ALPN=%s), dialing upstream…" % (host, client_alpn or "none"))
         # connect upstream (real server) with TLS, no verify (we're already MITMing).
         # The iptables REDIRECT flattens the original destination PORT, so we don't know if the app
         # dialed 443 or an alt-TLS port. Try the ports the routing redirects (443 then 8443) so
         # non-standard-port APIs (api.host:8443, :8443 gateways) stop silently vanishing.
         up = None
+        want_h2 = (client_alpn == "h2" and _HAVE_H2)
         for uport in (443, 8443):
             try:
                 up_raw = socket.create_connection((host, uport), timeout=15)
                 uctx = ssl._create_unverified_context()
-                try: uctx.set_alpn_protocols(["http/1.1"])
+                try: uctx.set_alpn_protocols(["h2", "http/1.1"] if want_h2 else ["http/1.1"])
                 except Exception: pass
                 up = uctx.wrap_socket(up_raw, server_hostname=host if not _is_ip(host) else None)
                 if self._debug and uport != 443: self.log("[mitm] upstream %s reached on alt port %d" % (host, uport))
@@ -288,8 +309,16 @@ class MitmProxy:
             try: tls_client.close()
             except Exception: pass
             return
-        if self._debug: self.log("[mitm] MITM established %s — relaying" % host)
-        self._pump_http(tls_client, up, host, "https")
+        up_alpn = ""
+        try: up_alpn = up.selected_alpn_protocol() or ""
+        except Exception: pass
+        if self._debug: self.log("[mitm] MITM established %s (app=%s upstream=%s) — relaying" % (host, client_alpn or "1.1", up_alpn or "1.1"))
+        # Route: if BOTH sides negotiated h2, use the h2 bridge (handles HTTP/2 + gRPC w/ trailers).
+        # Otherwise fall back to the HTTP/1.1 keep-alive pump (servers that only speak 1.1).
+        if want_h2 and up_alpn == "h2":
+            self._pump_h2(tls_client, up, host)
+        else:
+            self._pump_http(tls_client, up, host, "https")
 
     def _handle_plain(self, client):
         rf = client.makefile("rb")
@@ -342,7 +371,143 @@ class MitmProxy:
                 try: s.close()
                 except Exception: pass
 
-    def _relay_response(self, up, client, host, scheme):
+    # ---- HTTP/2 + gRPC bridge (both sides h2 via the `h2` lib; preserves trailers) ----
+    def _pump_h2(self, client_sock, up_sock, host):
+        """Bridge an HTTP/2 connection from the app to an HTTP/2 upstream, capturing every stream.
+        Handles gRPC (HTTP/2 POST + trailers + protobuf body) transparently because it relays at
+        the frame layer. Each app stream is mapped to an upstream stream and relayed both ways."""
+        try:
+            cfg_s = h2.config.H2Configuration(client_side=False, header_encoding="utf-8")
+            cfg_c = h2.config.H2Configuration(client_side=True,  header_encoding="utf-8")
+            s_conn = h2.connection.H2Connection(config=cfg_s)   # server side: faces the app
+            c_conn = h2.connection.H2Connection(config=cfg_c)   # client side: faces upstream
+            s_conn.initiate_connection()
+            c_conn.initiate_connection()
+            client_sock.sendall(s_conn.data_to_send())
+            up_sock.sendall(c_conn.data_to_send())
+            # stream map: app_stream_id -> upstream_stream_id (and reverse for routing responses)
+            fwd = {}     # app_id -> up_id
+            rev = {}     # up_id   -> app_id
+            client_sock.settimeout(None); up_sock.settimeout(None)
+            socks = [client_sock, up_sock]
+            while self._alive:
+                r, _, _ = select.select(socks, [], [], 1.0)
+                if not r:
+                    if any(_is_closed(s) for s in socks): break
+                    continue
+                for s in r:
+                    try: data = s.recv(65536)
+                    except Exception: data = b""
+                    if not data:
+                        try: self._h2_close(s_conn, c_conn, client_sock, up_sock, fwd, rev)
+                        except Exception: pass
+                        return
+                    try:
+                        if s is client_sock:
+                            evs = s_conn.receive_data(data)
+                            conn_to_flush, peer_sock = s_conn, client_sock
+                            upside = False
+                        else:
+                            evs = c_conn.receive_data(data)
+                            conn_to_flush, peer_sock = c_conn, up_sock
+                            upside = True
+                        out = conn_to_flush.data_to_send()
+                        if out: peer_sock.sendall(out)
+                    except h2.exceptions.ProtocolError:
+                        break
+                    except Exception:
+                        break
+                    for ev in evs:
+                        try:
+                            self._h2_handle_event(ev, s_conn, c_conn, client_sock, up_sock, fwd, rev, host, upside)
+                        except Exception:
+                            if self._debug: self.log("[mitm-h2] event err: %s" % ev)
+                # flush any pending frames
+                try:
+                    for conn, sk in ((s_conn, client_sock), (c_conn, up_sock)):
+                        d = conn.data_to_send()
+                        if d: sk.sendall(d)
+                except Exception:
+                    return
+        except Exception as e:
+            if self._debug: self.log("[mitm-h2] bridge error: %s" % e)
+        finally:
+            for s in (client_sock, up_sock):
+                try: s.close()
+                except Exception: pass
+
+    def _h2_handle_event(self, ev, s_conn, c_conn, client_sock, up_sock, fwd, rev, host, upside):
+        # upside=False => event came from the APP side (request);  True => from the UPSTREAM side (response)
+        if upside:
+            # ---- upstream -> app (response / trailers / response-data) ----
+            sid = getattr(ev, "stream_id", None)
+            appid = rev.get(sid)
+            if isinstance(ev, (h2.events.ResponseReceived, h2.events.TrailersReceived)):
+                if appid is None: return
+                # capture the response headers / trailers so bodyless responses (e.g. gRPC status-only)
+                # still appear in the Requests tab
+                if isinstance(ev, h2.events.ResponseReceived):
+                    status = next((v for k, v in ev.headers if k == ":status"), "")
+                    self.on_event({"dir": "in", "method": "RESP", "url": "%s [h2 stream %d]" % (host, appid),
+                                   "first": "HTTP/2 %s" % status, "data": "h2 response %s {trailer: grpc} %s" % (status, host),
+                                   "host": host})
+                s_conn.send_headers(appid, list(ev.headers), end_stream=ev.stream_ended)
+            elif isinstance(ev, h2.events.DataReceived):
+                if appid is None:
+                    c_conn.acknowledge_received_data(ev.flow_controlled_length, sid); return
+                if ev.data:
+                    self._emit_h2("in", host, appid, None, ev.data[:4_000_000])
+                    s_conn.send_data(appid, ev.data[:4_000_000])
+                c_conn.acknowledge_received_data(ev.flow_controlled_length, sid)
+                if ev.stream_ended: s_conn.end_stream(appid)
+            elif isinstance(ev, h2.events.StreamReset):
+                if appid is not None:
+                    try: s_conn.reset_stream(appid, getattr(ev, "error_code", 0))
+                    except Exception: pass
+        else:
+            # ---- app -> upstream (request headers / data / reset) ----
+            sid = getattr(ev, "stream_id", None)
+            if isinstance(ev, h2.events.RequestReceived):
+                upid = c_conn.get_next_available_stream_id()
+                fwd[sid] = upid; rev[upid] = sid
+                c_conn.send_headers(upid, list(ev.headers), end_stream=ev.stream_ended)
+            elif isinstance(ev, h2.events.DataReceived):
+                upid = fwd.get(sid)
+                if upid is None:
+                    s_conn.acknowledge_received_data(ev.flow_controlled_length, sid); return
+                if ev.data:
+                    self._emit_h2("out", host, sid, None, ev.data[:4_000_000])
+                    c_conn.send_data(upid, ev.data[:4_000_000])
+                s_conn.acknowledge_received_data(ev.flow_controlled_length, sid)
+                if ev.stream_ended: c_conn.end_stream(upid)
+            elif isinstance(ev, h2.events.StreamReset):
+                upid = fwd.get(sid)
+                if upid is not None:
+                    try: c_conn.reset_stream(upid, getattr(ev, "error_code", 0))
+                    except Exception: pass
+        # settings / window / ping events are handled internally by the h2 connection objects
+
+    def _emit_h2(self, direction, host, stream_id, headers_text, body):
+        """Emit an h2 stream chunk to the Requests tab as a readable entry."""
+        try:
+            # for gRPC, body is protobuf (binary) — show a hex-ish preview, not garbled utf-8
+            if body and len(body) > 2 and body[:1] in (b"\x00", b"\x01") and direction == "out":
+                text = "gRPC frame (grpc): " + body[:200].hex()
+            else:
+                text = (headers_text or "") + ("\n" + body.decode("utf-8", "replace") if body else "")
+            self.on_event({"dir": direction, "method": "GRPC" if direction == "out" else "RESP",
+                           "url": "%s [h2 stream %d]" % (host, stream_id),
+                           "first": "%s h2/%d" % (direction, stream_id),
+                           "data": text[:4000], "host": host})
+        except Exception:
+            pass
+
+    def _h2_close(self, s_conn, c_conn, client_sock, up_sock, fwd, rev):
+        try:
+            for conn, sk in ((s_conn, client_sock), (c_conn, up_sock)):
+                d = conn.data_to_send()
+                if d: sk.sendall(d)
+        except Exception: pass
         try:
             urf = up.makefile("rb")
             rfirst, rhdrs, rraw = _read_headers(urf)

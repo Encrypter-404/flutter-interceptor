@@ -126,16 +126,23 @@ and installs it with `adb install` — no root at any step.
 
 - **FLAG_SECURE** bank/login screens appear black in the mirror unless an LSPosed *DisableFlagSecure*
   module is enabled + scoped (an Android protection, not a tool bug).
-- A few apps ship **commercial RASP** that detect frida via multiple vectors + self-integrity and
-  self-destruct; these can't be intercepted by any runtime tool and need a per-app native patch. The
-  Report tab names the detected RASP when this happens.
+- **Commercial RASP** — a few apps ship RASP that detect frida via multiple vectors + self-integrity
+  and self-destruct. These can't be intercepted by any *runtime* tool and need a per-app native patch.
+  The Report tab names the detected RASP. For these, the **reFlutter root-free chain** is the better
+  starting point (it patches the binary on disk, not at runtime, so RASP's frida-detection doesn't
+  fire) — until you hit a signature-protected app (next item).
 - **reFlutter signature check** — re-signing changes the app's certificate, so apps that verify their
-  own integrity will refuse to run/re-login. Use the live intercept path for those.
-- **reFlutter engine support** — engines not yet in reFlutter's hash database report
-  "unsupported"; fall back to the on-device frida unpin (which also covers that engine's BoringSSL
-  via the byte-pattern + Java unpin already shipped).
-- **HTTP/2 & QUIC** — the in-tool MITM proxy is HTTP/1.1; HTTP/2-only and gRPC backends aren't
-  fully bridged yet, and QUIC/HTTP-3 traffic is blocked (not captured) so it falls back to TCP.
+  own integrity refuse to run/re-login. The tool detects `INSTALL_FAILED_VERIFICATION_FAILURE` and
+  automatically suggests switching to the live on-device intercept path (needs root).
+- **reFlutter engine support** — engines not yet in reFlutter's hash database report "unsupported";
+  the GUI then tells you to fall back to the on-device intercept. That path now also ships a
+  **version-independent handshake.cc locator** (finds `ssl_verify_peer_cert` via the `OPENSSL_PUT_ERROR`
+  `__FILE__` string, instead of per-version byte patterns) so newer Flutter engines can still be
+  unpinned. Auto-patching from it is gated behind `FI_EXPERIMENTAL_UNPIN` (off by default — it
+  diagnoses first; enable only on apps where static patterns already miss).
+- **QUIC / HTTP-3** is blocked (not captured) so the app falls back to TCP. **HTTP/2 and gRPC are now
+  fully bridged** end-to-end (the in-tool proxy negotiates ALPN `h2` on both sides and relays at the
+  frame layer, so gRPC trailers + protobuf survive).
 
 ## 📄 License
 
@@ -144,6 +151,24 @@ and installs it with `adb install` — no root at any step.
 ---
 
 ## 📦 Changelog
+
+### v1.1.1
+- **HTTP/2 + gRPC bridge** in the in-tool capture proxy — ALPN `h2` negotiated on both sides and
+  relayed at the HTTP/2 frame layer via the `h2` library, so gRPC requests/responses (trailers +
+  protobuf) survive end-to-end. HTTP/1.1 keep-alive path untouched. Loopback-verified (gRPC 200 +
+  `grpc-status=0` trailers relayed intact).
+- **Version-independent Flutter unpin (experimental)** — when all per-version byte patterns miss,
+  the engine now locates `ssl_verify_peer_cert` via the `OPENSSL_PUT_ERROR` `__FILE__` string
+  (`ssl/handshake.cc`) + its ADRP xref, instead of matching prologue bytes. Runs as a **diagnostic**
+  by default (reported in the Report tab); auto-patching is gated behind `FI_EXPERIMENTAL_UNPIN`
+  (off by default — patching the wrong `handshake.cc` function can brick the handshake, so opt in
+  deliberately).
+- **reFlutter install-failure classification** — `INSTALL_FAILED_VERIFICATION_FAILURE`,
+  `INSTALL_PARSE_FAILED`, signature clashes, insufficient storage etc. are now detected and surfaced
+  with the exact next step (e.g. "use the live intercept path for signature-protected apps"). A
+  signature clash triggers an automatic clean-reinstall retry.
+- **Better fallback guidance** — when reFlutter reports an unsupported engine, the GUI now tells you
+  to fall back to the on-device intercept path and reminds you about the root grant.
 
 ### v1.1.0
 - **New: root-free reFlutter → Burp chain** — `fi_reflutter.py` pulls, patches, re-signs and

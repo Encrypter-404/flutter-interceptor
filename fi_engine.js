@@ -62,8 +62,95 @@
              flutterPatched=true; R.hooks.push({name:"Flutter ssl_verify_peer_cert",ok:true,at:hit.address.toString()});
              send("[+][engine] Flutter BoringSSL unpinned @"+hit.address); }catch(e){} }); }catch(e){} });
     });
-    if(!flutterPatched){ if(tries<25) setTimeout(unpinFlutter,800); else finish("Flutter ssl_verify_peer_cert","no matching pattern (Dart/Flutter version?)"); }
+    if(!flutterPatched){
+      if(tries<25){ setTimeout(unpinFlutter,800); return; }
+      // STATIC PATTERNS EXHAUSTED. Run the version-independent locator (handshake.cc __FILE__ xref).
+      // If it finds OPENSSL_PUT_ERROR sites -> report them in the Report tab (proves it's BoringSSL +
+      // locates the verify area). AUTO-PATCHING is gated behind FI_EXPERIMENTAL_UNPIN (set by the
+      // orchestrator only when the user explicitly opts in) because patching the wrong handshake.cc
+      // function (e.g. ssl_run_handshake) to return 0 would brick the handshake. So: diagnose always,
+      // patch only when the flag is set.
+      var vi = locateHandshakeCcXrefs(m);
+      if(vi && vi.xrefs>0){
+        R.notes.push("version-independent: "+vi.xrefs+" OPENSSL_PUT_ERROR(handshake.cc) sites located");
+        if(vi.patched>0){
+          flutterPatched=true; R.hooks.push({name:"ssl_verify_peer_cert (xref, EXPERIMENTAL)",ok:true,at:"handshake.cc"});
+          send("[+][engine] Flutter BoringSSL unpinned via OPENSSL_PUT_ERROR xref (EXPERIMENTAL) — "+vi.patched+" site(s)");
+          diag(); return;
+        }
+        R.notes.push("leave FI_EXPERIMENTAL_UNPIN=1 to auto-patch (can crash the app if it mis-IDs the function)");
+      }
+      finish("Flutter ssl_verify_peer_cert","no matching pattern (Dart/Flutter version?)"+(vi&&vi.xrefs?(" — "+vi.xrefs+" handshake.cc xrefs found (see Report)"):""));
+    }
     else diag();
+  }
+
+  // ---------- (a2) version-independent Flutter unpin via OPENSSL_PUT_ERROR __FILE__ string ----------
+  // BoringSSL's OPENSSL_PUT_ERROR embeds __FILE__ as a string literal. ssl_verify_peer_cert lives in
+  // handshake.cc, so finding "ssl/handshake.cc" + its ADRP xref locates the verify-error area without
+  // any per-version byte pattern. Returns {xrefs:N, patched:N}. Patches ONLY when globalThis.
+  // FI_EXPERIMENTAL_UNPIN is truthy (orchestrator opt-in) — otherwise this is a pure diagnostic.
+  function locateHandshakeCcXrefs(m){
+    try{
+      var end=m.base.add(m.size);
+      var needle="73 73 6c 2f 68 61 6e 64 73 68 61 6b 65 2e 63 63";   // "ssl/handshake.cc"
+      var strs=[]; Process.enumerateRanges('r--').forEach(function(rg){
+        if(rg.base.compare(m.base)<0||rg.base.compare(end)>=0) return;
+        try{ Memory.scanSync(rg.base,rg.size,needle).forEach(function(h){ strs.push(h.address); }); }catch(e){}
+      });
+      if(!strs.length){ send("[*][engine] handshake.cc string not found (engine may use a different path)"); return {xrefs:0,patched:0}; }
+      var want = (globalThis.FI_EXPERIMENTAL_UNPIN) ? true : false;
+      var xrefs=0, patched=0;
+      Process.enumerateRanges('r-x').forEach(function(rg){
+        if(rg.base.compare(m.base)<0||rg.base.compare(end)>=0) return;
+        if(patched>=3) return;
+        try{
+          var buf=Memory.readByteArray(rg.base, Math.min(rg.size, 0x800000)); if(!buf) return;
+          var b=new Uint8Array(buf); var len=b.length;
+          for(var off=0; off+8<len; off+=4){
+            // 32-bit instruction words (little-endian)
+            var w=b[off]|(b[off+1]<<8)|(b[off+2]<<16)|((b[off+3]<<24)>>>0);
+            var w2=b[off+4]|(b[off+5]<<8)|(b[off+6]<<16)|((b[off+7]<<24)>>>0);
+            if((w & 0x9F000000)>>>0 !== 0x90000000) continue;        // ADRP
+            var rd=w & 0x1f;
+            if((w2 & 0xFF000000)>>>0 !== 0x91000000) continue;       // ADD (imm, 64-bit, shift0)
+            if((w2 & 0x1f)!==rd || ((w2>>5)&0x1f)!==rd) continue;   // ADD Rd==Rn==ADRP Rd
+            var immlo=(w>>>29)&0x3;
+            var immhi=(w>>>5)&0x7ffff;                               // 19 bits
+            var imm=((immhi<<2)|immlo); if(imm & (1<<20)) imm=imm-(1<<21);  // sign-extend 21-bit
+            var adrpAddr=rg.base.add(off);
+            var tgtPage=adrpAddr.and(ptr("0xFFFFFFFFFFFFF000")).add(ptr(imm*0x1000));
+            var addImm=(w2>>>10)&0xfff;                              // imm12
+            var tgtAddr=tgtPage.add(addImm);
+            for(var si=0; si<strs.length; si++){
+              if(tgtAddr.equals(strs[si])){ xrefs++;
+                if(want){ var p=walkBackToPrologue(rg.base, off);
+                  if(p){ try{ Interceptor.replace(p,new NativeCallback(function(){return 0;},'int',['pointer','int']));
+                    patched++; send("[+][engine] EXP xref patched @"+p); }catch(e){} } }
+                break;
+              }
+            }
+          }
+        }catch(e){}
+      });
+      if(xrefs>0) R.notes.push("handshake.cc: "+xrefs+" OPENSSL_PUT_ERROR xref(s)"+(want?(" — patched "+patched):" (diagnose-only; enable FI_EXPERIMENTAL_UNPIN to patch)"));
+      return {xrefs:xrefs, patched:patched};
+    }catch(e){ send("[!][engine] version-independent error: "+e); return {xrefs:0,patched:0}; }
+  }
+
+  function walkBackToPrologue(rgBase, off){
+    try{
+      var sz=Math.min(off+0x4000,0x800000); var buf=Memory.readByteArray(rgBase,sz); if(!buf) return null;
+      var b=new Uint8Array(buf);
+      for(var p=off; p>=8; p-=4){
+        var b3=b[p+3],b2=b[p+2],b1=b[p+1];
+        // str x30,[sp,#-imm]!  ->  "F? 0F 1C F8"
+        if((b3&0xFF)===0xF8 && b2===0x1C && b1===0x0F) return rgBase.add(p);
+        // stp x29,x30,[sp,#-imm]! ->  "F? ?? 01 A9" family; commonly "FF 03 01 D1"/"F? 43 01 D1"
+        if(b3===0xD1 && (b2&0x03)===0x01 && b1===0xFF) return rgBase.add(p);
+      }
+      return null;
+    }catch(e){ return null; }
   }
   // (b) libssl.so exported verify (covers Conscrypt/Cronet/OkHttp-native/any BoringSSL)
   function hook(name,ret){
